@@ -60,12 +60,19 @@ func (f allScopesFetcher) FetchTokenScopes(_ context.Context, _ string) ([]strin
 
 var _ scopes.FetcherInterface = allScopesFetcher{}
 
-func mockToolWithFeatureFlag(name, toolsetID string, readOnly bool, enableFlag, disableFlag string) inventory.ServerTool {
+func mockToolWithFeatureFlag(name, toolsetID string, readOnly bool, enableFlag, disableFlag inventory.FeatureFlag) inventory.ServerTool {
 	tool := mockTool(name, toolsetID, readOnly)
-	tool.FeatureFlagEnable = enableFlag
-	if disableFlag != "" {
-		tool.FeatureFlagDisable = []string{disableFlag}
+	features := make([]inventory.FeatureFlag, 0, 2)
+	if enableFlag != "" {
+		features = append(features, enableFlag)
 	}
+	if disableFlag != "" {
+		features = append(features, disableFlag)
+	}
+	tool.FeatureRule = inventory.NewFeatureRule(features, func(featureAsBool inventory.FeatureResolver) bool {
+		return (enableFlag == "" || featureAsBool(enableFlag)) &&
+			(disableFlag == "" || !featureAsBool(disableFlag))
+	})
 	return tool
 }
 
@@ -348,8 +355,8 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 
 			// Create feature checker that reads from context without whitelist validation
 			// (the whitelist is tested separately; here we test the filtering logic)
-			featureChecker := func(ctx context.Context, flag string) (bool, error) {
-				return slices.Contains(ghcontext.GetHeaderFeatures(ctx), flag), nil
+			featureChecker := func(ctx context.Context, flag inventory.FeatureFlag) (bool, error) {
+				return slices.Contains(ghcontext.GetHeaderFeatures(ctx), string(flag)), nil
 			}
 
 			apiHost, err := utils.NewAPIHost("https://api.github.com")
@@ -553,8 +560,8 @@ func TestStaticConfigEnforcement(t *testing.T) {
 			var capturedInventory *inventory.Inventory
 			var capturedCtx context.Context
 
-			featureChecker := func(ctx context.Context, flag string) (bool, error) {
-				return slices.Contains(ghcontext.GetHeaderFeatures(ctx), flag), nil
+			featureChecker := func(ctx context.Context, flag inventory.FeatureFlag) (bool, error) {
+				return slices.Contains(ghcontext.GetHeaderFeatures(ctx), string(flag)), nil
 			}
 
 			apiHost, err := utils.NewAPIHost("https://api.github.com")
@@ -737,7 +744,9 @@ func TestStaticInventoryPreservesPerRequestFeatureVariants(t *testing.T) {
 	available := inv.AvailableTools(ctx)
 	require.Len(t, available, 1)
 	assert.Equal(t, "list_issues", available[0].Tool.Name)
-	assert.Equal(t, github.FeatureFlagCSVOutput, available[0].FeatureFlagEnable)
+	assert.True(t, available[0].FeatureRule.Enabled(func(flag inventory.FeatureFlag) bool {
+		return flag == github.FeatureFlagCSVOutput
+	}))
 }
 
 func TestStaticInventoryDisablesOnlyDeleteRepository(t *testing.T) {
