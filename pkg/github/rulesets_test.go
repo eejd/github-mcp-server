@@ -377,7 +377,7 @@ func Test_RepositoryRulesetRead(t *testing.T) {
 	})
 
 	t.Run("mismatched-case level is rejected rather than silently normalized", func(t *testing.T) {
-		// The scope challenge in rulesetReadScopeAccess matches "level" with an
+		// The scope challenge in governanceReadScopeAccess matches "level" with an
 		// exact, case-sensitive comparison. If the handler instead normalized case
 		// (e.g. via strings.ToLower) before dispatching, a caller could send
 		// "Organization" to reach the organization-level read while the OAuth
@@ -1028,7 +1028,7 @@ func Test_CreateRepositoryRuleset(t *testing.T) {
 	})
 
 	t.Run("mismatched-case level is rejected rather than silently normalized", func(t *testing.T) {
-		// Mirrors the read-tool regression above: rulesetWriteScopeAccess only
+		// Mirrors the read-tool regression above: governanceWriteScopeAccess only
 		// recognizes an exact, lowercase "organization"/"enterprise" match. If the
 		// handler normalized case before dispatching, "Organization" would reach
 		// client.Organizations.CreateRepositoryRuleset while the OAuth middleware
