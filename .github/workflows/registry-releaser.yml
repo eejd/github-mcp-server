@@ -18,7 +18,6 @@
 name: Publish to MCP Registry
 
 on:
-  workflow_dispatch:
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
