@@ -1,3 +1,15 @@
+# NEUTRALISED ON THE HIVE FORK.
+#
+# Upstream triggers this on tag pushes (and, for Docker, a nightly cron). On a
+# fork that is not a convenience, it is a hazard: pushing our own
+# `v1.11.0-hive.N` tag would have armed three separate publishers at once, one of
+# which (registry-releaser) tries to publish to the official MCP registry under
+# *upstream's* server name. The fork publishes exactly one artifact, from
+# publish-hive.yml, and nothing else.
+#
+# Reduced to workflow_dispatch rather than deleted, deliberately: the file stays
+# in place so upstream edits to it still merge cleanly, and the only diff to carry
+# across a rebase is this header plus the `on:` block.
 name: Docker
 
 # This workflow uses actions that are not certified by GitHub.
@@ -6,21 +18,7 @@ name: Docker
 # documentation.
 
 on:
-  schedule:
-    - cron: "27 0 * * *"
-  push:
-    branches: ["main", "next"]
-    # Publish semver tags as releases.
-    tags: ["v*.*.*"]
-  pull_request:
-    branches: ["main", "next"]
   workflow_dispatch:
-    inputs:
-        description:
-          required: false
-          description: "Description of the run."
-          type: string
-          default: "Manual run"
 
 env:
   # Use docker.io for Docker Hub if empty

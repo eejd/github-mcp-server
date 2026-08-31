@@ -1,7 +1,15 @@
+# NEUTRALISED ON THE HIVE FORK.
+#
+# Upstream runs this on a nightly cron. The fork has issues disabled, so on the
+# fork it is a scheduled job that can only ever find nothing and spend Actions
+# minutes doing so.
+#
+# Reduced to workflow_dispatch rather than deleted, deliberately: the file stays
+# in place so upstream edits to it still merge cleanly, and the only diff to carry
+# across a rebase is this header plus the `on:` block.
 name: Close inactive issues
 on:
-  schedule:
-    - cron: "30 8 * * *"
+  workflow_dispatch:
 
 jobs:
   close-issues:
