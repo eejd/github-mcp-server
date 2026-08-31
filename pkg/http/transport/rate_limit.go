@@ -381,7 +381,9 @@ func rewind(req *http.Request) (*http.Request, bool) {
 // drain runs before the context-aware wait, so a cancelled call could not escape
 // it. A throttling body is a short JSON error; anything past maxDrainBytes is
 // misbehaviour, and abandoning that connection is the right outcome rather than a
-// cost — hitting the cap simply means net/http does not pool it.
+// cost. Note the boundary is inclusive: at exactly maxDrainBytes, io.LimitedReader
+// returns its own EOF without ever issuing the read that would have let the body
+// report EOF, so net/http does not pool that connection either.
 func drain(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
