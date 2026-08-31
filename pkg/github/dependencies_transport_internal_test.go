@@ -170,7 +170,9 @@ func TestRawClientKeepsTheThrottle(t *testing.T) {
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if atomic.AddInt32(&hits, 1) == 1 {
-			w.Header().Set("Retry-After", "1")
+			// Zero, not one: the replay path is identical either way, and a real
+			// second of wall clock buys the suite nothing.
+			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}

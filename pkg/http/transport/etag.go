@@ -240,10 +240,16 @@ func storable(resp *http.Response) bool {
 // Note the collision impact is NOT the same as RateLimitTransport's, whose key is
 // derived identically: there, a collision means two tokens share a throttle
 // bucket, which costs correctness only. Here, entries hold response bodies, so a
-// collision would serve one token's body to another — confidentiality, not just
-// correctness. The probability is negligible either way (~1.8e-15 across a few
-// hundred tokens over 64 bits), but do not carry that comment's reasoning across
-// to this one.
+// collision could serve one token's body to another — confidentiality, not just
+// correctness. Do not carry that comment's reasoning across to this one.
+//
+// Being precise about the exposure rather than only alarming about it: every
+// request is still revalidated, so the wrong body is served only where the server
+// answers 304 to the colliding token's If-None-Match. A personalized resource
+// carries an identity-specific ETag and would answer 200 with that token's own
+// content. The exposure is therefore resources whose representation is genuinely
+// shared between the two identities — and the probability is ~1.8e-15 over 64
+// bits across a few hundred tokens in any case.
 func cacheKey(req *http.Request) string {
 	sum := sha256.Sum256([]byte(req.Header.Get(headers.AuthorizationHeader)))
 	return req.Method + " " + req.URL.String() + " " + hex.EncodeToString(sum[:8])
