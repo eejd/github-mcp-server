@@ -282,6 +282,22 @@ type RequestDeps struct {
 
 	// StateSealer protects state sent through multi-round-trip requests.
 	StateSealer RequestStateSealer
+
+	// rateLimit is shared by every client this RequestDeps hands out, and must
+	// outlive any single request.
+	//
+	// This is the whole point of putting it here rather than inside the getters
+	// below. A rate-limit transport works by remembering what the *previous*
+	// response said - X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After - so
+	// the next request can be held back instead of spent. Allocated per call it
+	// would be born empty, observe exactly one response, and be discarded: the
+	// chain would look correct in a test that asserts the transport is present,
+	// and anticipate nothing at all in production.
+	//
+	// In http mode NewRequestDeps is called once, from RunHTTPServer, and the
+	// result is stored on the handler and reused for every request, so a field
+	// here is process-lifetime state. The transport is safe for concurrent use.
+	rateLimit *transport.RateLimitTransport
 }
 
 // NewRequestDeps creates a RequestDeps with the provided clients and configuration.
@@ -304,7 +320,30 @@ func NewRequestDeps(
 		ContentWindowSize: contentWindowSize,
 		featureChecker:    featureChecker,
 		obsv:              obsv,
+		rateLimit:         &transport.RateLimitTransport{Transport: http.DefaultTransport},
 	}
+}
+
+// baseTransport returns the shared rate-limit transport, or the default
+// transport when this RequestDeps was built without one (tests constructing
+// the struct literally). It is referenced, never constructed, so the state it
+// accumulates survives across requests.
+func (d *RequestDeps) baseTransport() http.RoundTripper {
+	if d.rateLimit == nil {
+		return http.DefaultTransport
+	}
+	return d.rateLimit
+}
+
+// restTransport returns the transport chain for the REST client.
+//
+// It is a separate seam from baseTransport because the raw-content client
+// delegates to GetClient and must not acquire a response cache: raw file
+// bodies are large and would evict everything useful. Naming the two apart
+// makes that constraint visible at the point a future cache would be added,
+// rather than leaving it to be rediscovered.
+func (d *RequestDeps) restTransport() http.RoundTripper {
+	return d.baseTransport()
 }
 
 // GetClient implements ToolDependencies.
@@ -343,7 +382,7 @@ func (d *RequestDeps) GetClient(ctx context.Context) (*gogithub.Client, error) {
 	// Construct REST client
 	restClient, err := gogithub.NewClient(
 		gogithub.WithHTTPClient(&http.Client{Transport: &transport.BearerAuthTransport{
-			Transport:    http.DefaultTransport,
+			Transport:    d.restTransport(),
 			Token:        token,
 			AllowedHosts: allowedHosts,
 		}}),
@@ -402,7 +441,7 @@ func (d *RequestDeps) GetGQLClient(ctx context.Context) (*githubv4.Client, error
 	gqlHTTPClient := &http.Client{
 		Transport: &transport.BearerAuthTransport{
 			Transport: &transport.GraphQLFeaturesTransport{
-				Transport: http.DefaultTransport,
+				Transport: d.baseTransport(),
 			},
 			Token:        token,
 			AllowedHosts: allowedHosts,

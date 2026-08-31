@@ -88,8 +88,15 @@ func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolv
 	// separate transport without it, so large file bodies are never buffered
 	// into the cache. The hosted, horizontally-scaled server builds a fresh REST
 	// client per request (see pkg/github RequestDeps) and does not use this path.
+	// One rate-limit transport shared by the REST, GraphQL and raw clients: quota
+	// is per token and this server presents one token, so all three draw on the
+	// same budget and must observe the same rate-limit state. It sits below the
+	// conditional-request cache, so a request served from cache after a 304 does
+	// not re-enter the throttle.
+	rateLimitTransport := &transport.RateLimitTransport{Transport: http.DefaultTransport}
+
 	restUATransport := &transport.UserAgentTransport{
-		Transport: &transport.ETagTransport{Transport: http.DefaultTransport},
+		Transport: &transport.ETagTransport{Transport: rateLimitTransport},
 		Agent:     fmt.Sprintf("github-mcp-server/%s", cfg.Version),
 	}
 	restClient, err := newRESTClient(cfg, restUATransport, restURL.String(), uploadURL.String(), allowedHosts)
@@ -102,7 +109,7 @@ func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolv
 	gqlHTTPClient := &http.Client{
 		Transport: &transport.BearerAuthTransport{
 			Transport: &transport.GraphQLFeaturesTransport{
-				Transport: http.DefaultTransport,
+				Transport: rateLimitTransport,
 			},
 			Token:         cfg.Token,
 			TokenProvider: cfg.TokenProvider,
@@ -116,7 +123,7 @@ func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolv
 	// uses a transport without the conditional-request cache: raw file bodies can
 	// be large and are streamed rather than retained in memory.
 	rawUATransport := &transport.UserAgentTransport{
-		Transport: http.DefaultTransport,
+		Transport: rateLimitTransport,
 		Agent:     fmt.Sprintf("github-mcp-server/%s", cfg.Version),
 	}
 	rawRESTClient, err := newRESTClient(cfg, rawUATransport, restURL.String(), uploadURL.String(), allowedHosts)
