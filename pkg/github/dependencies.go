@@ -298,6 +298,22 @@ type RequestDeps struct {
 	// result is stored on the handler and reused for every request, so a field
 	// here is process-lifetime state. The transport is safe for concurrent use.
 	rateLimit *transport.RateLimitTransport
+
+	// etag is the conditional-request cache for the REST client, and like
+	// rateLimit above it must be shared rather than rebuilt per request — a cache
+	// with a lifetime of one request is not a cache.
+	//
+	// Upstream wires this into the stdio server only, on the reasoning that the
+	// hosted deployment builds a fresh client per request. That reasoning is about
+	// where the transport is *allocated*, not about whether an in-process cache is
+	// useful here; with the allocation moved onto RequestDeps it applies to this
+	// server too. It is enabled here because this is a single replica, so a
+	// process-local cache is the whole cache. It would be the wrong call for a
+	// horizontally-scaled deployment, where each replica would hold a partial one.
+	//
+	// Deliberately NOT given to the raw-content client: raw bodies are whole files
+	// and would evict everything worth keeping. See rawTransport.
+	etag *transport.ETagTransport
 }
 
 // NewRequestDeps creates a RequestDeps with the provided clients and configuration.
@@ -311,6 +327,7 @@ func NewRequestDeps(
 	featureChecker inventory.FeatureFlagChecker,
 	obsv observability.Exporters,
 ) *RequestDeps {
+	rateLimit := &transport.RateLimitTransport{Transport: http.DefaultTransport}
 	return &RequestDeps{
 		apiHosts:          apiHosts,
 		version:           version,
@@ -320,7 +337,12 @@ func NewRequestDeps(
 		ContentWindowSize: contentWindowSize,
 		featureChecker:    featureChecker,
 		obsv:              obsv,
-		rateLimit:         &transport.RateLimitTransport{Transport: http.DefaultTransport},
+		rateLimit:         rateLimit,
+		// Chained here, not lazily in restTransport: that accessor is called
+		// concurrently by every request, and assigning through it would race.
+		// 8 MiB rather than the 32 MiB default — this server runs under a 256 MiB
+		// container limit, and a cache is not worth an OOM.
+		etag: &transport.ETagTransport{Transport: rateLimit, MaxTotalBytes: 8 << 20},
 	}
 }
 
@@ -335,19 +357,44 @@ func (d *RequestDeps) baseTransport() http.RoundTripper {
 	return d.rateLimit
 }
 
-// restTransport returns the transport chain for the REST client.
+// restTransport returns the transport chain for the REST client:
 //
-// It is a separate seam from baseTransport because the raw-content client
-// delegates to GetClient and must not acquire a response cache: raw file
-// bodies are large and would evict everything useful. Naming the two apart
-// makes that constraint visible at the point a future cache would be added,
-// rather than leaving it to be rediscovered.
+//	BearerAuthTransport -> ETagTransport -> RateLimitTransport -> default
+//
+// The order is load-bearing in both directions. ETagTransport must sit BELOW
+// BearerAuthTransport, because its cache key hashes the Authorization header:
+// above it, every entry would key on an empty header and one token's response
+// bodies would be served to another. And it must sit ABOVE RateLimitTransport,
+// so that a body served from cache after a 304 does not re-enter the throttle.
 func (d *RequestDeps) restTransport() http.RoundTripper {
+	if d.etag == nil {
+		return d.baseTransport()
+	}
+	return d.etag
+}
+
+// rawTransport returns the transport chain for the raw-content client: the
+// same throttle, deliberately without the cache.
+//
+// Raw responses are whole file bodies. Letting them into an LRU sized for API
+// responses would evict everything worth keeping and then fail to help anyway,
+// since a file is rarely re-read within a session. Upstream's stdio server
+// makes the same split with a separate rawUATransport; this is that decision
+// carried over, not a new one.
+func (d *RequestDeps) rawTransport() http.RoundTripper {
 	return d.baseTransport()
 }
 
 // GetClient implements ToolDependencies.
 func (d *RequestDeps) GetClient(ctx context.Context) (*gogithub.Client, error) {
+	return d.newRESTClient(ctx, d.restTransport())
+}
+
+// newRESTClient builds a go-github client over the given transport. It exists
+// so the raw-content client can be built the same way but on a chain without
+// the conditional-request cache; everything else about the two is identical,
+// including the host allow-list that scopes the bearer token.
+func (d *RequestDeps) newRESTClient(ctx context.Context, rt http.RoundTripper) (*gogithub.Client, error) {
 	// extract the token from the context
 	tokenInfo, ok := ghcontext.GetTokenInfo(ctx)
 	if !ok {
@@ -382,7 +429,7 @@ func (d *RequestDeps) GetClient(ctx context.Context) (*gogithub.Client, error) {
 	// Construct REST client
 	restClient, err := gogithub.NewClient(
 		gogithub.WithHTTPClient(&http.Client{Transport: &transport.BearerAuthTransport{
-			Transport:    d.restTransport(),
+			Transport:    rt,
 			Token:        token,
 			AllowedHosts: allowedHosts,
 		}}),
@@ -454,7 +501,9 @@ func (d *RequestDeps) GetGQLClient(ctx context.Context) (*githubv4.Client, error
 
 // GetRawClient implements ToolDependencies.
 func (d *RequestDeps) GetRawClient(ctx context.Context) (*raw.Client, error) {
-	client, err := d.GetClient(ctx)
+	// Not GetClient: the raw client must not inherit the conditional-request
+	// cache. See rawTransport.
+	client, err := d.newRESTClient(ctx, d.rawTransport())
 	if err != nil {
 		return nil, err
 	}

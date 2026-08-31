@@ -97,9 +97,16 @@ type lruItem struct {
 // retained. The cache is bounded both by entry count and by a total-byte budget
 // (LRU) and is safe for concurrent use.
 //
-// This transport is intended for the long-lived local (stdio) server only. The
-// hosted, horizontally-scaled server constructs a fresh REST client per request
-// and does not use it, so an in-process cache adds nothing there.
+// The transport must outlive a single request to be worth anything, so it has to
+// be held somewhere process-lifetime. In the stdio server that is the server
+// itself; in the `http` server it is RequestDeps, which is built once in
+// RunHTTPServer and reused for every request even though the clients it hands
+// out are per-request.
+//
+// A horizontally-scaled deployment is the case where this genuinely adds little:
+// each replica would hold its own partial cache and revalidate what the others
+// already had. That is a statement about replica count, not about transport
+// mode.
 type ETagTransport struct {
 	Transport http.RoundTripper
 
