@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -284,11 +285,20 @@ func (t *RateLimitTransport) observe(key string, resp *http.Response) {
 func (t *RateLimitTransport) retryAfter(resp *http.Response) (time.Duration, bool) {
 	var d time.Duration
 	if raw := resp.Header.Get(retryAfterHeader); raw != "" {
-		sec, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil || sec < 0 {
-			return 0, false
+		// Retry-After is delta-seconds or an HTTP-date (RFC 9110 10.2.3). GitHub
+		// sends delta-seconds today, but a value we cannot parse must not be
+		// silently treated as "no delay named" — that is indistinguishable from a
+		// MaxWait decline and would hide a format change as unexplained errors.
+		switch sec, err := strconv.Atoi(strings.TrimSpace(raw)); {
+		case err == nil && sec >= 0:
+			d = time.Duration(sec) * time.Second
+		default:
+			at, dateErr := http.ParseTime(strings.TrimSpace(raw))
+			if dateErr != nil {
+				return 0, false
+			}
+			d = at.Sub(t.timeNow())
 		}
-		d = time.Duration(sec) * time.Second
 	} else if raw := resp.Header.Get(rateLimitResetHeader); raw != "" && resp.Header.Get(rateLimitRemainingHeader) == "0" {
 		sec, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
@@ -347,16 +357,29 @@ func rewind(req *http.Request) (*http.Request, bool) {
 }
 
 // drain releases a superseded response so its connection returns to the pool.
+//
+// The Copy is not optional. net/http only reuses a connection when the body
+// has been read to EOF before Close; closing an unread body tells the transport
+// to discard the connection instead. Under sustained throttling every replay
+// would then burn a fresh TCP connection — the opposite of what a transport
+// that exists to reduce pressure should do.
 func drain(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 }
 
 // rateLimitKey derives a stable, non-reversible key from the request's
 // Authorization header. Quota is per token, so state must be too. Mirrors
-// cacheKey in etag.go.
+// cacheKey in etag.go, including its 8-byte prefix.
+//
+// A collision costs correctness, not confidentiality: two tokens would share
+// one bucket, so one's exhaustion could hold the other back for a bounded
+// wait. No credential and no response body crosses between them. At the
+// default bound of 256 tracked tokens the birthday probability over 64 bits is
+// around 1.8e-15.
 func rateLimitKey(req *http.Request) string {
 	sum := sha256.Sum256([]byte(req.Header.Get(headers.AuthorizationHeader)))
 	return hex.EncodeToString(sum[:8])

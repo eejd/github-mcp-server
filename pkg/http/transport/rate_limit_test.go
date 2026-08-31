@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -148,6 +149,154 @@ func TestRateLimitTransportRetriesSecondaryLimit(t *testing.T) {
 				t.Fatalf("want one 1s wait honouring Retry-After, got %v", clock.waits)
 			}
 		})
+	}
+}
+
+// TestRateLimitTransportDeclinesLongRetryAfter is the reactive mirror of
+// TestRateLimitTransportDeclinesLongPrimaryWait. Without it, deleting or
+// inverting the MaxWait check in retryAfter would go unnoticed on this path —
+// and a Retry-After GitHub can legitimately set to several minutes would stall
+// a tool call for all of it.
+func TestRateLimitTransportDeclinesLongRetryAfter(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000_000, 0)}
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set(retryAfterHeader, "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	tr := newTestRateLimitTransport(t, clock)
+	resp := doGet(t, tr, server.URL)
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("want the throttling response surfaced, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("a Retry-After beyond MaxWait must not be waited out; got %d hits", got)
+	}
+	if len(clock.waits) != 0 {
+		t.Fatalf("want no wait, got %v", clock.waits)
+	}
+}
+
+// TestRateLimitTransportParsesHTTPDateRetryAfter covers the other Retry-After
+// form RFC 9110 allows. GitHub sends delta-seconds today; this keeps a switch to
+// the date form from silently turning into "no delay named", which is
+// indistinguishable from a MaxWait decline.
+func TestRateLimitTransportParsesHTTPDateRetryAfter(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000_000, 0)}
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set(retryAfterHeader, clock.now.Add(5*time.Second).UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr := newTestRateLimitTransport(t, clock)
+	resp := doGet(t, tr, server.URL)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want the replay to succeed, got %d", resp.StatusCode)
+	}
+	if len(clock.waits) != 1 || clock.waits[0] != 5*time.Second {
+		t.Fatalf("want one 5s wait from the HTTP-date form, got %v", clock.waits)
+	}
+}
+
+// trackedBody records whether it was read to EOF before being closed.
+type trackedBody struct {
+	r          *bytes.Reader
+	sawEOF     bool
+	closed     bool
+	eofAtClose bool
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == io.EOF {
+		b.sawEOF = true
+	}
+	return n, err
+}
+
+func (b *trackedBody) Close() error {
+	b.closed = true
+	b.eofAtClose = b.sawEOF
+	return nil
+}
+
+// throttleOnceTransport answers the first request with a throttling response
+// carrying a trackedBody, then succeeds.
+type throttleOnceTransport struct {
+	body  *trackedBody
+	calls int
+}
+
+func (t *throttleOnceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.calls++
+	if t.calls == 1 {
+		h := http.Header{}
+		h.Set(retryAfterHeader, "1")
+		return &http.Response{
+			StatusCode:    http.StatusTooManyRequests,
+			Header:        h,
+			Body:          t.body,
+			ContentLength: int64(t.body.r.Len()),
+			Request:       req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Request:    req,
+	}, nil
+}
+
+// TestRateLimitTransportDrainsSupersededResponse pins drain's contract directly.
+//
+// net/http only returns a connection to the pool when the response body reached
+// EOF before Close; closing an unread body makes the transport discard the
+// connection instead. Under sustained throttling that would burn a fresh TCP
+// connection per attempt — the opposite of what a transport built to reduce
+// pressure should do.
+//
+// Asserting on the connection itself does not work: an httptest round-trip
+// reuses the connection either way at these body sizes, so a
+// distinct-RemoteAddr test passes against a drain that only closes. Observing
+// the body directly is what actually discriminates.
+func TestRateLimitTransportDrainsSupersededResponse(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000_000, 0)}
+	body := &trackedBody{r: bytes.NewReader([]byte(`{"message":"secondary rate limit"}`))}
+	inner := &throttleOnceTransport{body: body}
+
+	tr := &RateLimitTransport{Transport: inner, now: func() time.Time { return clock.now }, after: clock.after}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/rate_limit", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if inner.calls != 2 {
+		t.Fatalf("want the request replayed once, got %d calls", inner.calls)
+	}
+	if !body.closed {
+		t.Fatal("the superseded response body must be closed")
+	}
+	if !body.eofAtClose {
+		t.Fatal("the superseded response body must be read to EOF before Close, or net/http discards the connection")
 	}
 }
 

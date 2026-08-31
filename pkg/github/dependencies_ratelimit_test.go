@@ -194,7 +194,14 @@ func TestRequestDepsSharesRateLimitStateAcrossClients(t *testing.T) {
 	start := time.Now()
 	require.NoError(t, gql.Query(ctx, &query, nil))
 
-	assert.NotZero(t, time.Since(start),
-		"the GraphQL request must observe the exhausted window the REST response reported")
+	// A real threshold, not NotZero. Any network call takes non-zero time, so
+	// NotZero passes against a transport that shares no state at all and never
+	// waits — it would have pinned nothing. The reset is 2s out, so a working
+	// transport blocks for close to that and a broken one returns in
+	// milliseconds; 1s separates them with room for scheduling noise.
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, time.Second,
+		"the GraphQL request must observe the exhausted window the REST response reported; "+
+			"took %s, which means it did not wait", elapsed)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&gqlHits))
 }
