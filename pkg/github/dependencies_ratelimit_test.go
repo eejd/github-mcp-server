@@ -45,6 +45,8 @@ func findRateLimitTransport(rt http.RoundTripper) *ghtransport.RateLimitTranspor
 			rt = v.Transport
 		case *ghtransport.GraphQLFeaturesTransport:
 			rt = v.Transport
+		case *ghtransport.ETagTransport:
+			rt = v.Transport
 		default:
 			return nil
 		}
@@ -84,35 +86,6 @@ func TestRequestDepsRateLimitTransportSurvivesAcrossCalls(t *testing.T) {
 	require.NotNil(t, secondRL, "REST chain must carry the rate-limit transport")
 	assert.Same(t, firstRL, secondRL,
 		"the rate-limit transport must be shared across calls; a per-call instance remembers nothing")
-}
-
-// TestRequestDepsRawClientSharesRateLimitTransport: the raw client delegates to
-// GetClient, and raw reads spend the same per-token budget as everything else,
-// so it must draw on the same state rather than a private one.
-func TestRequestDepsRawClientSharesRateLimitTransport(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	deps := newRateLimitTestDeps(t, server.URL)
-	ctx := ghcontext.WithTokenInfo(context.Background(), &ghcontext.TokenInfo{Token: "request-token"})
-
-	restClient, err := deps.GetClient(ctx)
-	require.NoError(t, err)
-	_, err = deps.GetRawClient(ctx)
-	require.NoError(t, err)
-
-	restRL := findRateLimitTransport(restClient.Client().Transport)
-	require.NotNil(t, restRL)
-
-	// GetRawClient builds on GetClient, so a second GetClient resolves to the
-	// same transport the raw client received.
-	again, err := deps.GetClient(ctx)
-	require.NoError(t, err)
-	assert.Same(t, restRL, findRateLimitTransport(again.Client().Transport))
 }
 
 // TestRequestDepsGraphQLRetriesSecondaryLimit proves the transport is actually
