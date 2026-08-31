@@ -1,8 +1,23 @@
+# DISARMED ON THE HIVE FORK — the fork runs no automation.
+#
+# Actions are disabled at the repository level, so nothing here runs at all.
+# This file is additionally reduced to workflow_dispatch so that re-enabling
+# Actions cannot silently start it: the repository setting is one click, and the
+# workflows whose accidental firing has effects outside this repository should
+# not depend on that click alone.
+#
+# Reduced rather than deleted, deliberately: the file stays in place so upstream
+# edits to it still merge cleanly, and the only diff to carry across a rebase is
+# this header plus the `on:` block.
+#
+# This one matters most. Upstream fires it on tag pushes, and our own
+# `v1.11.0-hive.N` tag matches its pattern — so with Actions on, tagging a
+# release would have published an artifact under our account. In the case of
+# registry-releaser, to the official MCP registry under *upstream's* server
+# name.
 name: GoReleaser Release
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 permissions:
   contents: write
   id-token: write

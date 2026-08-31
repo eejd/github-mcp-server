@@ -1,9 +1,19 @@
+# DISARMED ON THE HIVE FORK — the fork runs no automation.
+#
+# Actions are disabled at the repository level, so nothing here runs at all.
+# This file is additionally reduced to workflow_dispatch so that re-enabling
+# Actions cannot silently start it.
+#
+# This one is a real trade-off rather than pure upside. Keeping Layer-1 CI
+# byte-identical to upstream is what lets our patches rebase cleanly and stay
+# offerable upstream, and a test run is harmless if it ever fires. It is disarmed
+# anyway because "no automation" is easier to verify than "no automation except
+# the two we judged safe", and because the cost is one header and an `on:` block
+# to carry across a rebase. The suite still runs — locally, via script/test,
+# which is what actually gated every commit on this fork.
 name: golangci-lint
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
