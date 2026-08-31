@@ -235,12 +235,11 @@ func (b *trackedBody) Close() error {
 // carrying a trackedBody, then succeeds.
 type throttleOnceTransport struct {
 	body  *trackedBody
-	calls int
+	calls atomic.Int32
 }
 
 func (t *throttleOnceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.calls++
-	if t.calls == 1 {
+	if t.calls.Add(1) == 1 {
 		h := http.Header{}
 		h.Set(retryAfterHeader, "1")
 		return &http.Response{
@@ -289,8 +288,8 @@ func TestRateLimitTransportDrainsSupersededResponse(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if inner.calls != 2 {
-		t.Fatalf("want the request replayed once, got %d calls", inner.calls)
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("want the request replayed once, got %d calls", got)
 	}
 	if !body.closed {
 		t.Fatal("the superseded response body must be closed")
@@ -298,6 +297,94 @@ func TestRateLimitTransportDrainsSupersededResponse(t *testing.T) {
 	if !body.eofAtClose {
 		t.Fatal("the superseded response body must be read to EOF before Close, or net/http discards the connection")
 	}
+}
+
+// blockingBody yields `yield` bytes and then blocks until released, modelling a
+// server that streams a throttling body slowly or without end.
+type blockingBody struct {
+	remaining int
+	release   chan struct{}
+	read      int
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	if b.remaining > 0 {
+		n := min(len(p), b.remaining)
+		b.remaining -= n
+		b.read += n
+		return n, nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error { return nil }
+
+// TestRateLimitTransportBoundsDrain: drain runs before the context-aware wait, so
+// an unbounded read there hands a hostile or malfunctioning server a way to stall
+// the replay loop for as long as it keeps streaming — a cancelled tool call could
+// not escape it. The cap is what makes that impossible.
+func TestRateLimitTransportBoundsDrain(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000_000, 0)}
+	body := &blockingBody{remaining: maxDrainBytes * 4, release: make(chan struct{})}
+	inner := &blockingThrottleTransport{body: body}
+
+	tr := &RateLimitTransport{Transport: inner, now: func() time.Time { return clock.now }, after: clock.after}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/rate_limit", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			done <- nil
+			return
+		}
+		done <- resp
+	}()
+
+	select {
+	case resp := <-done:
+		if resp == nil {
+			t.Fatal("round trip failed")
+		}
+		_ = resp.Body.Close()
+	case <-time.After(5 * time.Second):
+		close(body.release)
+		t.Fatal("drain did not stop at the cap; an unbounded read blocked the replay")
+	}
+
+	if body.read > maxDrainBytes {
+		t.Fatalf("drain read %d bytes, want at most %d", body.read, maxDrainBytes)
+	}
+}
+
+type blockingThrottleTransport struct {
+	body  *blockingBody
+	calls atomic.Int32
+}
+
+func (t *blockingThrottleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.calls.Add(1) == 1 {
+		h := http.Header{}
+		h.Set(retryAfterHeader, "1")
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     h,
+			Body:       t.body,
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Request:    req,
+	}, nil
 }
 
 // TestRateLimitTransportDoesNotRetryOrdinaryForbidden: a permission failure is

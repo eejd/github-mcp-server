@@ -31,6 +31,12 @@ const (
 	// waiting and lets the caller see the real throttling response — a clear
 	// error beats an invisible multi-minute stall.
 	defaultRateLimitMaxWait = 60 * time.Second
+
+	// maxDrainBytes bounds how much of a superseded response body is read before
+	// Close in order to make its connection reusable. GitHub's throttling bodies
+	// are a few hundred bytes; this is generous for a legitimate one and refuses
+	// to be held open by anything larger.
+	maxDrainBytes = 64 << 10 // 64 KiB
 )
 
 // Rate-limit response headers. GitHub documents these on every REST and GraphQL
@@ -289,6 +295,12 @@ func (t *RateLimitTransport) retryAfter(resp *http.Response) (time.Duration, boo
 		// sends delta-seconds today, but a value we cannot parse must not be
 		// silently treated as "no delay named" — that is indistinguishable from a
 		// MaxWait decline and would hide a format change as unexplained errors.
+		//
+		// Negative delta-seconds and a past HTTP-date are handled differently, on
+		// purpose. RFC 9110 defines delta-seconds as non-negative, so a negative
+		// one is malformed and falls through to be declined; a date in the past is
+		// well-formed and says the delay has already elapsed, so it is clamped to
+		// zero and the replay proceeds at once.
 		switch sec, err := strconv.Atoi(strings.TrimSpace(raw)); {
 		case err == nil && sec >= 0:
 			d = time.Duration(sec) * time.Second
@@ -358,16 +370,23 @@ func rewind(req *http.Request) (*http.Request, bool) {
 
 // drain releases a superseded response so its connection returns to the pool.
 //
-// The Copy is not optional. net/http only reuses a connection when the body
-// has been read to EOF before Close; closing an unread body tells the transport
+// Reading before Close is not optional. net/http only reuses a connection when
+// the body reached EOF before Close; closing an unread body tells the transport
 // to discard the connection instead. Under sustained throttling every replay
 // would then burn a fresh TCP connection — the opposite of what a transport
 // that exists to reduce pressure should do.
+//
+// The read is capped. An unbounded copy hands a hostile or malfunctioning server
+// a way to stall the replay loop for as long as it cares to keep streaming, and
+// drain runs before the context-aware wait, so a cancelled call could not escape
+// it. A throttling body is a short JSON error; anything past maxDrainBytes is
+// misbehaviour, and abandoning that connection is the right outcome rather than a
+// cost — hitting the cap simply means net/http does not pool it.
 func drain(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.CopyN(io.Discard, resp.Body, maxDrainBytes)
 	_ = resp.Body.Close()
 }
 
