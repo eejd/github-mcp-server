@@ -1,9 +1,18 @@
+# DISARMED ON THE HIVE FORK — the fork runs no automation.
+#
+# Actions are disabled at the repository level, so nothing here runs at all.
+# This file is additionally reduced to workflow_dispatch so that re-enabling
+# Actions cannot silently start it: the repository setting is one click, and the
+# workflows whose accidental firing has effects outside this repository should
+# not depend on that click alone.
+#
+# Reduced rather than deleted, deliberately: the file stays in place so upstream
+# edits to it still merge cleanly, and the only diff to carry across a rebase is
+# this header plus the `on:` block.
 name: Label issues for AI review
 on:
-  issues:
-    types:
-      - reopened
-      - opened
+  workflow_dispatch:
+
 jobs:
   label_issues:
     runs-on: ubuntu-latest
