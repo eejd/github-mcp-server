@@ -36,16 +36,25 @@ requests even though the config file is gone. Manage the two together.
 they scan pushes and can block one carrying a credential. On a public fork of a tool whose whole
 subject is API tokens, that protection is worth more than strict adherence to "nothing runs".
 
-### Not verifiable from here
+### Checked by hand, because the API cannot answer it
 
 **Installed GitHub Apps.** An App with access to this repository can open pull requests and post
-checks entirely independently of Actions being disabled. `GET /user/installations` and
-`GET /repos/{o}/{r}/installation` both require GitHub App JWT authentication and cannot be read
-with a personal access token, so this was checked by hand rather than by API:
+checks entirely independently of Actions being disabled — it is the one automation surface none of
+the controls above cover. It also cannot be enumerated with a personal access token:
+`GET /user/installations` returns 403 and `GET /repos/{o}/{r}/installation` returns 401, both
+requiring GitHub App JWT authentication. So it is a manual check, at:
 
-- `https://github.com/settings/installations` — user-level, including apps granted "all
-  repositories"
+- `https://github.com/settings/installations` — user-level, and the one that matters, because an App
+  granted "all repositories" reaches this fork without appearing to be scoped to it
 - `https://github.com/eejd/github-mcp-server/settings/installations` — this repository
+
+**Resolved 2026-08-31:** one App installation was found and **suspended** by the account owner.
+
+Note the scope of that remedy, which is wider than this fork: suspending an installation blocks it
+across **every** repository in that installation, not only this one. If the App is wanted elsewhere,
+the narrower control is to remove this repository from its repository-access list and unsuspend it.
+Either way, re-granting an App access here would reopen this surface with nothing in the repository
+to signal it — which is why the check is recorded rather than assumed to stay true.
 
 Everything else was swept and is clean: no webhooks, no rulesets, no branch protection, no
 code-scanning default setup, no Pages, no Discussions, no Issues, no auto-merge, no Actions
