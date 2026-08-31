@@ -400,7 +400,8 @@ func drain(resp *http.Response) {
 // one bucket, so one's exhaustion could hold the other back for a bounded
 // wait. No credential and no response body crosses between them. At the
 // default bound of 256 tracked tokens the birthday probability over 64 bits is
-// around 1.8e-15.
+// around 1.8e-15. ETagTransport's cacheKey is derived the same way but does NOT
+// share this property — its entries hold response bodies. See its comment.
 func rateLimitKey(req *http.Request) string {
 	sum := sha256.Sum256([]byte(req.Header.Get(headers.AuthorizationHeader)))
 	return hex.EncodeToString(sum[:8])

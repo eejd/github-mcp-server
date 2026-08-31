@@ -97,9 +97,16 @@ type lruItem struct {
 // retained. The cache is bounded both by entry count and by a total-byte budget
 // (LRU) and is safe for concurrent use.
 //
-// This transport is intended for the long-lived local (stdio) server only. The
-// hosted, horizontally-scaled server constructs a fresh REST client per request
-// and does not use it, so an in-process cache adds nothing there.
+// The transport must outlive a single request to be worth anything, so it has to
+// be held somewhere process-lifetime. In the stdio server that is the server
+// itself; in the `http` server it is RequestDeps, which is built once in
+// RunHTTPServer and reused for every request even though the clients it hands
+// out are per-request.
+//
+// A horizontally-scaled deployment is the case where this genuinely adds little:
+// each replica would hold its own partial cache and revalidate what the others
+// already had. That is a statement about replica count, not about transport
+// mode.
 type ETagTransport struct {
 	Transport http.RoundTripper
 
@@ -227,6 +234,22 @@ func storable(resp *http.Response) bool {
 	return true
 }
 
+// cacheKey scopes an entry to the token that fetched it, by hashing the request's
+// Authorization header.
+//
+// Note the collision impact is NOT the same as RateLimitTransport's, whose key is
+// derived identically: there, a collision means two tokens share a throttle
+// bucket, which costs correctness only. Here, entries hold response bodies, so a
+// collision could serve one token's body to another — confidentiality, not just
+// correctness. Do not carry that comment's reasoning across to this one.
+//
+// Being precise about the exposure rather than only alarming about it: every
+// request is still revalidated, so the wrong body is served only where the server
+// answers 304 to the colliding token's If-None-Match. A personalized resource
+// carries an identity-specific ETag and would answer 200 with that token's own
+// content. The exposure is therefore resources whose representation is genuinely
+// shared between the two identities — and the probability is ~1.8e-15 over 64
+// bits across a few hundred tokens in any case.
 func cacheKey(req *http.Request) string {
 	sum := sha256.Sum256([]byte(req.Header.Get(headers.AuthorizationHeader)))
 	return req.Method + " " + req.URL.String() + " " + hex.EncodeToString(sum[:8])

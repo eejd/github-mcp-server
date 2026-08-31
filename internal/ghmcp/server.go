@@ -83,11 +83,12 @@ func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolv
 	// so unchanged resources are revalidated with a 304 instead of being
 	// re-downloaded in full.
 	//
-	// The conditional-request cache is enabled only for the REST API client on
-	// this long-lived local (stdio) server. The raw-content client below uses a
-	// separate transport without it, so large file bodies are never buffered
-	// into the cache. The hosted, horizontally-scaled server builds a fresh REST
-	// client per request (see pkg/github RequestDeps) and does not use this path.
+	// The conditional-request cache is enabled for the REST API client only. The
+	// raw-content client below uses a separate transport without it, so large file
+	// bodies are never buffered into the cache.
+	//
+	// The `http` server makes the same split for the same reasons, on RequestDeps
+	// rather than here — see restTransport and rawTransport in pkg/github.
 	// One rate-limit transport shared by the REST, GraphQL and raw clients: quota
 	// is per token and this server presents one token, so all three draw on the
 	// same budget and must observe the same rate-limit state. It sits below the
