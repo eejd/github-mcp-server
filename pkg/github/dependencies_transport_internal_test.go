@@ -1,9 +1,14 @@
 package github
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 
+	ghcontext "github.com/github/github-mcp-server/pkg/context"
 	"github.com/github/github-mcp-server/pkg/http/transport"
 )
 
@@ -92,5 +97,104 @@ func TestTransportSeamsTolerateALiteralStruct(t *testing.T) {
 	}
 	if deps.rawTransport() != http.DefaultTransport {
 		t.Fatal("a zero RequestDeps must fall back to the default transport")
+	}
+}
+
+// chainTestHostResolver points every GitHub URL at one test server.
+type chainTestHostResolver struct{ u *url.URL }
+
+func (r chainTestHostResolver) BaseRESTURL(context.Context) (*url.URL, error) { return r.u, nil }
+func (r chainTestHostResolver) GraphqlURL(context.Context) (*url.URL, error)  { return r.u, nil }
+func (r chainTestHostResolver) UploadURL(context.Context) (*url.URL, error)   { return r.u, nil }
+func (r chainTestHostResolver) RawURL(context.Context) (*url.URL, error)      { return r.u, nil }
+func (r chainTestHostResolver) AuthorizationServerURL(context.Context) (*url.URL, error) {
+	return r.u, nil
+}
+
+func newChainTestDeps(t *testing.T, endpoint string) (*RequestDeps, context.Context) {
+	t.Helper()
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("parse endpoint: %v", err)
+	}
+	deps := NewRequestDeps(chainTestHostResolver{u: u}, "test", false, nil, nil, 0, nil, nil)
+	ctx := ghcontext.WithTokenInfo(context.Background(), &ghcontext.TokenInfo{Token: "chain-test-token"})
+	return deps, ctx
+}
+
+// TestBuiltRESTChainPutsAuthAboveCache pins the ordering where it is actually
+// assembled, not just at the seam that supplies it.
+//
+// TestRESTChainOrder above checks what restTransport() returns. It cannot catch
+// newRESTClient wrapping those two the other way round — writing
+// ETagTransport{BearerAuthTransport{...}} would still leave restTransport()
+// returning an ETagTransport over a RateLimitTransport, so that test would pass
+// while the cache ran before the Authorization header was set, keyed every entry
+// on an empty header, and served one token's response bodies to another.
+//
+// This walks the chain the client was actually built with.
+func TestBuiltRESTChainPutsAuthAboveCache(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	deps, ctx := newChainTestDeps(t, server.URL)
+	client, err := deps.GetClient(ctx)
+	if err != nil {
+		t.Fatalf("GetClient: %v", err)
+	}
+
+	bearer, ok := client.Client().Transport.(*transport.BearerAuthTransport)
+	if !ok {
+		t.Fatalf("auth must be the outermost layer, got %T", client.Client().Transport)
+	}
+	etag, ok := bearer.Transport.(*transport.ETagTransport)
+	if !ok {
+		t.Fatalf("the cache must sit beneath auth, got %T — above it, every entry keys on an empty Authorization header", bearer.Transport)
+	}
+	if etag != deps.etag {
+		t.Fatal("the client must use the shared cache, not a fresh one")
+	}
+}
+
+// TestRawClientKeepsTheThrottle closes the gap left by asserting only on
+// rawTransport(): raw.NewClient re-wraps the go-github client, and if that ever
+// dropped the transport the seam test would still pass. Behavioural, because
+// raw.Client keeps its inner client unexported.
+//
+// The server throttles once. Without the throttle in the chain the 429 reaches
+// the caller after a single request; with it, the request is replayed and the
+// server sees two.
+func TestRawClientKeepsTheThrottle(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("file body"))
+	}))
+	defer server.Close()
+
+	deps, ctx := newChainTestDeps(t, server.URL)
+	rawClient, err := deps.GetRawClient(ctx)
+	if err != nil {
+		t.Fatalf("GetRawClient: %v", err)
+	}
+
+	resp, err := rawClient.GetRawContent(ctx, "o", "r", "path", nil)
+	if err != nil {
+		t.Fatalf("GetRawContent: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want the replay to succeed, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("the raw chain must carry the throttle; want 2 upstream hits, got %d", got)
 	}
 }

@@ -234,6 +234,16 @@ func storable(resp *http.Response) bool {
 	return true
 }
 
+// cacheKey scopes an entry to the token that fetched it, by hashing the request's
+// Authorization header.
+//
+// Note the collision impact is NOT the same as RateLimitTransport's, whose key is
+// derived identically: there, a collision means two tokens share a throttle
+// bucket, which costs correctness only. Here, entries hold response bodies, so a
+// collision would serve one token's body to another — confidentiality, not just
+// correctness. The probability is negligible either way (~1.8e-15 across a few
+// hundred tokens over 64 bits), but do not carry that comment's reasoning across
+// to this one.
 func cacheKey(req *http.Request) string {
 	sum := sha256.Sum256([]byte(req.Header.Get(headers.AuthorizationHeader)))
 	return req.Method + " " + req.URL.String() + " " + hex.EncodeToString(sum[:8])
